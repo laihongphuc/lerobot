@@ -30,22 +30,26 @@ import threading
 import time
 from concurrent import futures
 from dataclasses import asdict
+from pathlib import Path
 from pprint import pformat
 from queue import Empty, Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import draccus
 import grpc
 import torch
 
+from lerobot.configs import PreTrainedConfig
 from lerobot.lerobot_types import PolicyAction
 from lerobot.policies import get_policy_class, make_pre_post_processors
+from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import PolicyProcessorPipeline
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
+from lerobot.utils.import_utils import _peft_available, require_package
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -59,6 +63,42 @@ from .helpers import (
     observations_similar,
     raw_observation_to_observation,
 )
+
+if TYPE_CHECKING or _peft_available:
+    from peft import PeftConfig, PeftModel
+else:
+    PeftConfig = None
+    PeftModel = None
+
+
+def _unwrap_policy_config(policy: PreTrainedPolicy) -> PreTrainedConfig:
+    """PEFT wraps the module; image features and processors need the base config."""
+    if hasattr(policy, "get_base_model"):
+        return policy.get_base_model().config
+    return policy.config
+
+
+def _load_policy(policy_class: type[PreTrainedPolicy], pretrained_name_or_path: str) -> PreTrainedPolicy:
+    """Load a checkpoint, including LoRA/PEFT adapters when ``adapter_config.json`` is present."""
+    adapter_config = Path(pretrained_name_or_path) / "adapter_config.json"
+    if not adapter_config.is_file():
+        return policy_class.from_pretrained(pretrained_name_or_path)
+
+    require_package("peft", extra="peft")
+    peft_config = PeftConfig.from_pretrained(pretrained_name_or_path)
+    base_path = peft_config.base_model_name_or_path
+    if not base_path:
+        raise ValueError(
+            "No pretrained model name found in adapter config. Can't instantiate the base policy "
+            f"for adapter at {pretrained_name_or_path}."
+        )
+    policy = policy_class.from_pretrained(base_path)
+    return PeftModel.from_pretrained(
+        policy,
+        pretrained_name_or_path,
+        config=peft_config,
+        is_trainable=False,
+    )
 
 
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
@@ -94,7 +134,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
     @property
     def policy_image_features(self):
-        return self.policy.config.image_features
+        return _unwrap_policy_config(self.policy).image_features
 
     def _reset_server(self) -> None:
         """Flushes server state when new client connects."""
@@ -149,13 +189,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         policy_class = get_policy_class(self.policy_type)
 
         start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
+        self.policy = _load_policy(policy_class, policy_specs.pretrained_name_or_path)
         self.policy.to(self.device)
+        self.policy.eval()
+        policy_config = _unwrap_policy_config(self.policy)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
         self.preprocessor, self.postprocessor = make_pre_post_processors(
-            self.policy.config,
+            policy_config,
             pretrained_path=policy_specs.pretrained_name_or_path,
             preprocessor_overrides={
                 "device_processor": device_override,

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
+import json
 import logging
 import logging.handlers
 import os
@@ -65,6 +67,44 @@ def visualize_action_queue_size(action_queue_size: list[int]) -> None:
 
 def map_robot_keys_to_lerobot_features(robot: Robot) -> dict[str, dict]:
     return hw_to_dataset_features(robot.observation_features, OBS_STR, use_video=False)
+
+
+def prompt_hash(task: str) -> str:
+    """Short hash shown in infer logs so a prompt change is obvious."""
+    return hashlib.sha256(task.encode("utf-8")).hexdigest()[:8]
+
+
+def load_tasks(path: str | Path) -> list[str]:
+    """Load subtask strings from JSON (list or ``{"tasks": [...]}``) or a YAML list of scalars."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"tasks file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        data = json.loads(text)
+        if isinstance(data, dict):
+            data = data.get("tasks", data.get("prompts", []))
+        if not isinstance(data, list) or not data:
+            raise ValueError(f"{path} must contain a non-empty list of task strings")
+        return [str(item).strip() for item in data if str(item).strip()]
+
+    tasks: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        elif line.startswith("-"):
+            line = line[1:].strip()
+        if (line.startswith('"') and line.endswith('"')) or (line.startswith("'") and line.endswith("'")):
+            line = line[1:-1]
+        if line:
+            tasks.append(line)
+    if not tasks:
+        raise ValueError(f"No task strings found in {path}")
+    return tasks
 
 
 def is_image_key(k: str) -> bool:

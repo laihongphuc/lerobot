@@ -262,6 +262,7 @@ def test_robot_client_registers_builtin_robot_types():
         "koch_follower",
         "omx_follower",
         "bi_so_follower",
+        "astribot",
     ]
     for robot_type in expected_robot_types:
         assert robot_type in known_choices, (
@@ -269,3 +270,24 @@ def test_robot_client_registers_builtin_robot_types():
             f"Ensure the corresponding module is imported in robot_client.py. "
             f"Known choices: {sorted(known_choices)}"
         )
+
+
+def test_set_task_index_drops_queue_and_wraps(robot_client):
+    from lerobot.async_inference.helpers import TimedAction
+
+    robot_client.tasks = ["first subtask", "second subtask", "third subtask"]
+    robot_client.task_index = 0
+    robot_client.action_queue.put(TimedAction(timestamp=0.0, timestep=1, action=torch.zeros(6)))
+    robot_client.must_go.clear()
+
+    assert robot_client.set_task_index(1) is True
+    assert robot_client.current_task == "second subtask"
+    assert robot_client.action_queue.empty()
+    assert robot_client.must_go.is_set()
+
+    assert robot_client.next_task() is True
+    assert robot_client.current_task == "third subtask"
+    assert robot_client.next_task() is True
+    assert robot_client.current_task == "first subtask"
+    assert robot_client.set_task_index(9, wrap=False) is False
+    assert robot_client.current_task == "first subtask"

@@ -35,6 +35,8 @@ python src/lerobot/async_inference/robot_client.py \
 
 import logging
 import pickle  # nosec
+import select
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -64,6 +66,7 @@ else:
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
+    astribot,
     bi_so_follower,
     koch_follower,
     make_robot_from_config,
@@ -88,7 +91,9 @@ from .helpers import (
     TimedAction,
     TimedObservation,
     get_logger,
+    load_tasks,
     map_robot_keys_to_lerobot_features,
+    prompt_hash,
     visualize_action_queue_size,
 )
 
@@ -148,6 +153,107 @@ class RobotClient:
         # Use an event for thread-safe coordination
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
+
+        self._task_lock = threading.Lock()
+        if config.tasks_file:
+            self.tasks = load_tasks(config.tasks_file)
+            if config.task_index < 0 or config.task_index >= len(self.tasks):
+                raise ValueError(
+                    f"task_index {config.task_index} out of range for {len(self.tasks)} tasks in "
+                    f"{config.tasks_file}"
+                )
+            self.task_index = config.task_index
+        else:
+            self.tasks = [config.task] if config.task else [""]
+            self.task_index = 0
+        task = self.current_task
+        self.logger.info(
+            "Task [%d/%d] prompt[%s]=%s",
+            self.task_index + 1,
+            len(self.tasks),
+            prompt_hash(task),
+            task[:80] + ("..." if len(task) > 80 else ""),
+        )
+
+    @property
+    def current_task(self) -> str:
+        with self._task_lock:
+            return self.tasks[self.task_index]
+
+    def set_task_index(self, index: int, *, wrap: bool = True) -> bool:
+        """Switch the language prompt. Drops queued actions so the next infer uses the new task."""
+        n = len(self.tasks)
+        if n == 0:
+            return False
+        if wrap:
+            index = index % n
+        elif index < 0 or index >= n:
+            return False
+        with self._task_lock:
+            if index == self.task_index:
+                return False
+            self.task_index = index
+            task = self.tasks[index]
+        with self.action_queue_lock:
+            self.action_queue = Queue()
+        self.must_go.set()
+        self.logger.info(
+            "Task [%d/%d] prompt[%s]=%s",
+            index + 1,
+            n,
+            prompt_hash(task),
+            task[:80] + ("..." if len(task) > 80 else ""),
+        )
+        return True
+
+    def next_task(self) -> bool:
+        with self._task_lock:
+            nxt = self.task_index + 1
+        return self.set_task_index(nxt)
+
+    def prev_task(self) -> bool:
+        with self._task_lock:
+            nxt = self.task_index - 1
+        return self.set_task_index(nxt)
+
+    def listen_task_keys(self) -> None:
+        """TTY: 1–9 jump to a subtask, n/c next, p previous. Restores the terminal on exit."""
+        if not sys.stdin.isatty() or len(self.tasks) <= 1:
+            return
+        try:
+            import atexit
+            import termios
+            import tty
+        except ImportError:
+            self.logger.warning("termios unavailable — subtask keys disabled (not a POSIX TTY)")
+            return
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+
+        def restore() -> None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+        atexit.register(restore)
+        tty.setcbreak(fd)
+        n = min(9, len(self.tasks))
+        self.logger.info("Subtask keys: 1-%d jump, n/c next, p previous (stdin is a TTY)", n)
+        try:
+            while self.running:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if not ready:
+                    continue
+                key = sys.stdin.read(1)
+                if not key:
+                    break
+                if key in "123456789":
+                    self.set_task_index(int(key) - 1, wrap=False)
+                elif key in ("n", "c"):
+                    self.next_task()
+                elif key == "p":
+                    self.prev_task()
+        finally:
+            restore()
 
     @property
     def running(self):
@@ -424,7 +530,7 @@ class RobotClient:
             start_time = time.perf_counter()
 
             raw_observation: RawObservation = self.robot.get_observation()
-            raw_observation["task"] = task
+            raw_observation["task"] = self.current_task
 
             with self.latest_action_lock:
                 latest_action = self.latest_action
@@ -444,7 +550,13 @@ class RobotClient:
 
             _ = self.send_observation(observation)
 
-            self.logger.debug(f"QUEUE SIZE: {current_queue_size} (Must go: {observation.must_go})")
+            self.logger.debug(
+                "QUEUE SIZE: %s (Must go: %s) prompt[%s]=%s",
+                current_queue_size,
+                observation.must_go,
+                prompt_hash(raw_observation["task"]),
+                raw_observation["task"][:60],
+            )
             if observation.must_go:
                 # must-go event will be set again after receiving actions
                 self.must_go.clear()
@@ -515,7 +627,10 @@ def async_client(cfg: RobotClientConfig):
 
         try:
             # The main thread runs the control loop
-            client.control_loop(task=cfg.task)
+            if sys.stdin.isatty() and len(client.tasks) > 1:
+                key_thread = threading.Thread(target=client.listen_task_keys, daemon=True)
+                key_thread.start()
+            client.control_loop(task=client.current_task)
 
         finally:
             client.stop()

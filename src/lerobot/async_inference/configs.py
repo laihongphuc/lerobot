@@ -118,8 +118,19 @@ class RobotClientConfig:
     # would be aggregated on the client side anyway, depending on the value of `chunk_size_threshold`)
     actions_per_chunk: int = field(metadata={"help": "Number of actions per chunk"})
 
-    # Task instruction for the robot to execute (e.g., 'fold my tshirt')
+    # Task instruction for the robot to execute (e.g., 'fold my tshirt').
+    # Ignored as the live prompt when ``tasks_file`` is set — use ``task_index`` instead.
     task: str = field(default="", metadata={"help": "Task instruction for the robot to execute"})
+
+    # YAML/JSON list of subtask strings. When set, keys 1–9 / n / p switch the prompt at runtime.
+    tasks_file: str | None = field(
+        default=None,
+        metadata={"help": "Path to a YAML/JSON list of subtask prompts (keys 1–9, n, p to switch)"},
+    )
+    task_index: int = field(
+        default=0,
+        metadata={"help": "Initial 0-based subtask index when tasks_file is set"},
+    )
 
     # Network configuration
     server_address: str = field(default="localhost:8080", metadata={"help": "Server address to connect to"})
@@ -179,6 +190,9 @@ class RobotClientConfig:
         if self.actions_per_chunk <= 0:
             raise ValueError(f"actions_per_chunk must be positive, got {self.actions_per_chunk}")
 
+        if self.task_index < 0:
+            raise ValueError(f"task_index must be >= 0, got {self.task_index}")
+
         self.aggregate_fn = get_aggregate_function(self.aggregate_fn_name)
 
     @classmethod
@@ -198,6 +212,8 @@ class RobotClientConfig:
             "fps": self.fps,
             "actions_per_chunk": self.actions_per_chunk,
             "task": self.task,
+            "tasks_file": self.tasks_file,
+            "task_index": self.task_index,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
         }

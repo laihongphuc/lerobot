@@ -452,3 +452,41 @@ def test_image_processing_pipeline_preserves_content():
     corner_val = processed_img[:, 5, 5].mean()  # Corner
 
     assert center_val > corner_val, "Image processing should preserve recognizable patterns"
+
+
+def test_load_tasks_yaml_list(tmp_path):
+    from lerobot.async_inference.helpers import load_tasks
+
+    path = tmp_path / "tasks.yaml"
+    path.write_text(
+        '# comment\n- "pick the cup"\n- press the button\n',
+        encoding="utf-8",
+    )
+    assert load_tasks(path) == ["pick the cup", "press the button"]
+
+
+def test_load_tasks_json_object(tmp_path):
+    from lerobot.async_inference.helpers import load_tasks
+
+    path = tmp_path / "tasks.json"
+    path.write_text('{"tasks": ["a", "b"]}', encoding="utf-8")
+    assert load_tasks(path) == ["a", "b"]
+
+
+def test_load_tasks_coffee_example():
+    from pathlib import Path
+
+    from lerobot.async_inference.helpers import load_tasks
+
+    path = Path("examples/astribot/tasks.yaml")
+    tasks = load_tasks(path)
+    assert len(tasks) == 6
+    assert tasks[0].startswith("use the left hand to grasp the cup located beneath the blue")
+    assert "emerald green beverage dispenser" in tasks[5]
+
+
+def test_prompt_hash_stable():
+    from lerobot.async_inference.helpers import prompt_hash
+
+    assert prompt_hash("hello") == prompt_hash("hello")
+    assert prompt_hash("hello") != prompt_hash("world")
