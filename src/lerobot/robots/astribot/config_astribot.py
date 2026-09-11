@@ -44,6 +44,7 @@ class AstribotConfig(RobotConfig):
     image_width: int = 640
     connect_timeout_s: float = 10.0
     obs_timeout_s: float = 2.0
+    reconnect_delay_s: float = 1.0
 
     def __post_init__(self):
         super().__post_init__()

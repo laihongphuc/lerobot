@@ -159,6 +159,11 @@ class TestActionAndObsFeatures:
             assert key in feats
             assert feats[key]["shape"] == (480, 640, 3)
 
+    def test_build_action_message_echoes_obs_seq(self):
+        payload = build_action_message(_trailing_sample(), "trailing", seq=7)
+        assert payload["seq"] == 7
+        assert payload["frame_index"] == 7
+
     def test_build_action_message_interleaved_clips_grippers(self):
         trailing = _trailing_sample()
         trailing[14] = 150.0

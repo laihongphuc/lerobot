@@ -3,9 +3,10 @@
 # to the local Astribot TCP bridge (default 127.0.0.1:5555).
 #
 # The checkpoint path is loaded *on the GPU*, so CKPT must exist there.
-# If the robot LAN cannot reach the GPU, open a tunnel first:
-#   ssh -N -L 8080:127.0.0.1:8080 user@gpu-box
-# then leave SERVER_ADDRESS at 127.0.0.1:8080.
+# If the robot LAN cannot reach the GPU, open a tunnel first (on the robot PC):
+#   bash examples/astribot/tunnel.sh
+#   SERVER_ADDRESS=127.0.0.1:8090 bash examples/astribot/run_robot_client.sh
+# Do not reuse -L 8080/8081 if those local ports are already taken.
 set -euo pipefail
 
 SERVER_ADDRESS="${SERVER_ADDRESS:-127.0.0.1:8080}"

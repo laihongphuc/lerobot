@@ -222,11 +222,13 @@ def build_action_message(
     *,
     prompt: str | None = None,
     frame_index: int | None = None,
+    seq: int | None = None,
 ) -> dict[str, Any]:
     """Build the JSON action the SDK bridge expects.
 
     ``trailing_values`` are policy/dataset order. They are remapped to ``layout``
     for the wire. Grippers are clipped to ``[0, 100]`` (mm), not rescaled.
+    Echo ``seq`` when the bridge tags obs with a sequence number.
     """
     if len(trailing_values) != N_JOINTS:
         raise ValueError(f"Expected {N_JOINTS}-D trailing action, got {len(trailing_values)}")
@@ -247,6 +249,9 @@ def build_action_message(
         payload["prompt"] = prompt
     if frame_index is not None:
         payload["frame_index"] = frame_index
+    if seq is not None:
+        payload["seq"] = int(seq)
+        payload.setdefault("frame_index", int(seq))
     return payload
 
 

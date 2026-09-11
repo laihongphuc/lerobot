@@ -92,7 +92,13 @@ def _load_policy(policy_class: type[PreTrainedPolicy], pretrained_name_or_path: 
             "No pretrained model name found in adapter config. Can't instantiate the base policy "
             f"for adapter at {pretrained_name_or_path}."
         )
-    policy = policy_class.from_pretrained(base_path)
+    # Weights come from the base repo, but the feature names, image shapes and
+    # policy options belong to the fine-tune, so read the config from the adapter dir.
+    policy = policy_class.from_pretrained(
+        base_path,
+        config=PreTrainedConfig.from_pretrained(pretrained_name_or_path),
+        revision=peft_config.revision,
+    )
     return PeftModel.from_pretrained(
         policy,
         pretrained_name_or_path,

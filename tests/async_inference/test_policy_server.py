@@ -189,6 +189,48 @@ def test_obs_sanity_checks(policy_server):
     assert policy_server._obs_sanity_checks(obs_ok, prev) is True
 
 
+@skip_if_package_missing("peft")
+def test_load_policy_uses_finetuned_config_not_base_repo(monkeypatch, tmp_path):
+    """LoRA weights come from the base repo, feature names from the adapter dir.
+
+    Loading the base repo's config instead makes the server ask for the base
+    camera keys and blow up with a KeyError on the fine-tune's image features.
+    """
+    from lerobot.async_inference import policy_server as ps
+
+    (tmp_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+    finetuned_config = object()
+    seen = {}
+
+    class FakePeftConfig:
+        base_model_name_or_path = "lerobot/pi05_base"
+        revision = None
+
+        @classmethod
+        def from_pretrained(cls, _path):
+            return cls()
+
+    class FakePolicy:
+        @classmethod
+        def from_pretrained(cls, path, *, config=None, revision=None):
+            seen["path"] = path
+            seen["config"] = config
+            return cls()
+
+    monkeypatch.setattr(ps, "PeftConfig", FakePeftConfig)
+    monkeypatch.setattr(
+        ps, "PeftModel", type("M", (), {"from_pretrained": staticmethod(lambda p, *a, **k: p)})
+    )
+    monkeypatch.setattr(
+        ps.PreTrainedConfig, "from_pretrained", classmethod(lambda cls, path: finetuned_config)
+    )
+
+    ps._load_policy(FakePolicy, str(tmp_path))
+
+    assert seen["path"] == "lerobot/pi05_base"
+    assert seen["config"] is finetuned_config
+
+
 def test_predict_action_chunk(monkeypatch, policy_server):
     """End-to-end test of `_predict_action_chunk` with a stubbed _get_action_chunk."""
     # Import only when needed

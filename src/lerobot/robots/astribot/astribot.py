@@ -49,6 +49,16 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 
+def _obs_seq(message: dict[str, Any]) -> int | None:
+    raw = message.get("seq", message.get("frame_index"))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 class Astribot(Robot):
     """Talks to the Astribot SDK TCP bridge; exposes dataset-order joints and cameras.
 
@@ -75,6 +85,8 @@ class Astribot(Robot):
         self._is_connected = False
         self._layout: Layout | None = None
         self._last_images: dict[str, np.ndarray] = {}
+        self._latest_seq: int | None = None
+        self._policy_driving = False
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
@@ -117,7 +129,9 @@ class Astribot(Robot):
         self._stop_event.clear()
         self._obs_event.clear()
         self._latest_obs = None
+        self._latest_seq = None
         self._layout = None
+        self._policy_driving = False
         self._is_connected = True
         self._reader_thread = threading.Thread(target=self._read_loop, name="astribot-obs", daemon=True)
         self._reader_thread.start()
@@ -130,25 +144,66 @@ class Astribot(Robot):
             self.config.port,
         )
 
-    def _read_loop(self) -> None:
-        assert self._socket is not None
-        while not self._stop_event.is_set():
+    def _drop_socket(self) -> None:
+        with self._send_lock:
+            sock = self._socket
+            self._socket = None
+            self._is_connected = False
+            self._policy_driving = False
+        if sock is not None:
+            with suppress(OSError):
+                sock.close()
+
+    def _reconnect(self) -> bool:
+        """Re-open the bridge socket. The bridge holds the last command meanwhile."""
+        while not self._stop_event.wait(self.config.reconnect_delay_s):
             try:
-                message = recv_message(self._socket)
+                sock = socket.create_connection(
+                    (self.config.host, self.config.port),
+                    timeout=self.config.connect_timeout_s,
+                )
+            except OSError as e:
+                logger.warning("Astribot bridge reconnect failed: %s", e)
+                continue
+            sock.settimeout(1.0)
+            with self._send_lock:
+                self._socket = sock
+                self._is_connected = True
+            logger.info("Astribot bridge reconnected on %s:%s", self.config.host, self.config.port)
+            return True
+        return False
+
+    def _read_loop(self) -> None:
+        while not self._stop_event.is_set():
+            sock = self._socket
+            if sock is None:
+                if not self._reconnect():
+                    break
+                continue
+            try:
+                message = recv_message(sock)
             except TimeoutError:
                 continue
             except (ConnectionError, OSError, ValueError, json.JSONDecodeError) as e:
-                if not self._stop_event.is_set():
-                    logger.warning("Astribot TCP lost: %s", e)
-                    self._is_connected = False
-                break
+                if self._stop_event.is_set():
+                    break
+                logger.warning("Astribot TCP lost (%s); reconnecting", e)
+                self._drop_socket()
+                continue
             if not isinstance(message, dict):
                 continue
             if message.get("type", "obs") != "obs":
                 continue
+            seq = _obs_seq(message)
             with self._obs_lock:
                 self._latest_obs = message
+                self._latest_seq = seq
             self._obs_event.set()
+            # The ROS bridge waits ~3s for an action on each seq. PI05 handshake
+            # and the first forward are slower than that, so hold the current pose
+            # until the policy starts draining chunks.
+            if not self._policy_driving:
+                self._send_hold_from_obs(message)
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
@@ -188,18 +243,45 @@ class Astribot(Robot):
         observation.update(frames)
         return observation
 
-    @check_if_not_connected
-    def send_action(self, action: RobotAction) -> RobotAction:
-        trailing = [float(action[name]) for name in TRAILING_JOINT_NAMES]
-        layout: Layout = self._layout or detect_layout(None, None, self.config.robot_interleaved)
-        payload = build_action_message(trailing, layout)
-        assert self._socket is not None
+    def _send_hold_from_obs(self, message: dict[str, Any]) -> None:
+        """Reply to an obs with the current joints so the bridge does not time out."""
+        if self._socket is None or not self._is_connected:
+            return
+        try:
+            values, names = extract_state(message)
+        except ValueError:
+            return
+        layout = detect_layout(values, names, self.config.robot_interleaved)
+        if self._layout is None:
+            self._layout = layout
+            logger.info(
+                "Robot names say %s — matching reply layout",
+                "interleaved [L7,gL,R7,gR]" if layout == "interleaved" else "trailing [L7,R7,gL,gR]",
+            )
+        trailing = interleaved_to_trailing(values) if layout == "interleaved" else list(values)
+        payload = build_action_message(trailing, layout, seq=_obs_seq(message))
         try:
             with self._send_lock:
+                if self._socket is None or self._policy_driving:
+                    return
+                send_message(self._socket, payload)
+        except OSError as e:
+            logger.debug("Hold-pose send skipped: %s", e)
+
+    @check_if_not_connected
+    def send_action(self, action: RobotAction) -> RobotAction:
+        self._policy_driving = True
+        trailing = [float(action[name]) for name in TRAILING_JOINT_NAMES]
+        layout: Layout = self._layout or detect_layout(None, None, self.config.robot_interleaved)
+        payload = build_action_message(trailing, layout, seq=self._latest_seq)
+        try:
+            with self._send_lock:
+                if self._socket is None:
+                    raise DeviceNotConnectedError("Astribot bridge socket is down; reconnecting")
                 send_message(self._socket, payload)
         except OSError as e:
             logger.error("Failed to send action to Astribot bridge: %s", e)
-            self._is_connected = False
+            self._drop_socket()
             raise DeviceNotConnectedError(f"Astribot TCP send failed: {e}") from e
 
         # Return dataset-order (trailing) values actually commanded after gripper clip.
@@ -208,8 +290,8 @@ class Astribot(Robot):
             for i, name in enumerate(TRAILING_JOINT_NAMES)
         }
 
-    @check_if_not_connected
     def disconnect(self) -> None:
+        # Idempotent: the reader may already have dropped the socket to reconnect.
         # Do not send zeros — the bridge holds the last command.
         self._stop_event.set()
         sock = self._socket

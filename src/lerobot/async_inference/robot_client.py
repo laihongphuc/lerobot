@@ -616,28 +616,36 @@ def async_client(cfg: RobotClientConfig):
 
     client = RobotClient(cfg)
 
-    if client.start():
-        client.logger.info("Starting action receiver thread...")
+    if not client.start():
+        client.stop()
+        raise RuntimeError(
+            f"Failed to connect to policy server at {cfg.server_address}. "
+            "On the GPU run `bash examples/astribot/run_policy_server.sh`. "
+            "On the robot PC the tunnel must forward that host:port "
+            "(default 127.0.0.1:8080, or SERVER_ADDRESS if you used another local port)."
+        )
 
-        # Create and start action receiver thread
-        action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=True)
+    client.logger.info("Starting action receiver thread...")
 
-        # Start action receiver thread
-        action_receiver_thread.start()
+    # Create and start action receiver thread
+    action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=True)
 
-        try:
-            # The main thread runs the control loop
-            if sys.stdin.isatty() and len(client.tasks) > 1:
-                key_thread = threading.Thread(target=client.listen_task_keys, daemon=True)
-                key_thread.start()
-            client.control_loop(task=client.current_task)
+    # Start action receiver thread
+    action_receiver_thread.start()
 
-        finally:
-            client.stop()
-            action_receiver_thread.join()
-            if cfg.debug_visualize_queue_size:
-                visualize_action_queue_size(client.action_queue_size)
-            client.logger.info("Client stopped")
+    try:
+        # The main thread runs the control loop
+        if sys.stdin.isatty() and len(client.tasks) > 1:
+            key_thread = threading.Thread(target=client.listen_task_keys, daemon=True)
+            key_thread.start()
+        client.control_loop(task=client.current_task)
+
+    finally:
+        client.stop()
+        action_receiver_thread.join()
+        if cfg.debug_visualize_queue_size:
+            visualize_action_queue_size(client.action_queue_size)
+        client.logger.info("Client stopped")
 
 
 if __name__ == "__main__":
