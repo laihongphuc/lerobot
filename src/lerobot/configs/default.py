@@ -55,10 +55,16 @@ class DatasetConfig:
     streaming: bool = False
     # Fraction of episodes held out per task for offline evaluation (0.0 = disabled).
     eval_split: float = 0.0
+    # Train every frame on one instruction instead of its own per-frame task string.
+    # The episode-level task labels still drive the eval_split, so the held-out
+    # episodes stay balanced across the original subtasks.
+    task_prompt: str | None = None
 
     def __post_init__(self) -> None:
         if self.repo_type not in ("dataset", "bucket"):
             raise ValueError(f"repo_type must be 'dataset' or 'bucket', got {self.repo_type!r}")
+        if self.task_prompt is not None and not self.task_prompt.strip():
+            raise ValueError("task_prompt must be a non-empty instruction, or None to use dataset tasks.")
         if self.eval_split != 0.0 and self.streaming:
             raise ValueError(
                 "eval_split requires map-style datasets and is not supported with dataset.streaming=true."

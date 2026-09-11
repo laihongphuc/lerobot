@@ -1266,6 +1266,36 @@ def test_episode_boundary_integrity(tmp_path, empty_lerobot_dataset_factory):
         cumulative += ep_length
 
 
+def test_apply_task_prompt_overrides_every_task_index(tmp_path, empty_lerobot_dataset_factory):
+    """One global instruction replaces the per-frame subtask strings.
+
+    ``meta.tasks`` must keep one row per original task: ``__getitem__`` looks the
+    string up positionally, so collapsing to a single row would raise IndexError
+    for every frame whose task_index is non-zero.
+    """
+    from lerobot.datasets.factory import apply_task_prompt
+
+    features = {"state": {"dtype": "float32", "shape": (1,), "names": None}}
+    dataset = empty_lerobot_dataset_factory(root=tmp_path / "test", features=features, use_videos=False)
+
+    tasks = ["pick", "place", "navigate"]
+    for task in tasks:
+        for _ in range(3):
+            dataset.add_frame({"state": torch.randn(1), "task": task})
+        dataset.save_episode()
+    dataset.finalize()
+
+    loaded = LeRobotDataset(dataset.repo_id, root=dataset.root)
+    assert len({loaded[i]["task"] for i in range(len(loaded))}) == len(tasks)
+
+    apply_task_prompt(loaded, "make an iced coffee")
+
+    assert len(loaded.meta.tasks) == len(tasks)
+    assert {loaded[i]["task"] for i in range(len(loaded))} == {"make an iced coffee"}
+    # task_index is untouched, so the parquet frames stay readable as-is.
+    assert {int(loaded[i]["task_index"].item()) for i in range(len(loaded))} == set(range(len(tasks)))
+
+
 def test_task_indexing_and_validation(tmp_path, empty_lerobot_dataset_factory):
     """Test that tasks are properly indexed and retrievable."""
     features = {"state": {"dtype": "float32", "shape": (1,), "names": None}}

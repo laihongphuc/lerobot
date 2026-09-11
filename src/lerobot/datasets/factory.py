@@ -17,6 +17,7 @@ import logging
 import math
 from pprint import pformat
 
+import pandas as pd
 import torch
 
 from lerobot.configs import PreTrainedConfig
@@ -100,6 +101,25 @@ def resolve_delta_timestamps(
         delta_timestamps = None
 
     return delta_timestamps
+
+
+def apply_task_prompt(dataset: LeRobotDataset | StreamingLeRobotDataset, prompt: str) -> None:
+    """Make every frame carry ``prompt`` instead of its own task string.
+
+    ``__getitem__`` resolves the task with ``meta.tasks.iloc[task_index].name``, so
+    the row count has to stay put; only the index (the task strings) collapses to a
+    single repeated value. Rewriting it to one row would raise IndexError on any
+    frame whose ``task_index`` is non-zero.
+    """
+    tasks = dataset.meta.tasks
+    if tasks is None or len(tasks) == 0:
+        raise ValueError(
+            f"dataset.task_prompt={prompt!r} was set but {dataset.meta.repo_id} declares no tasks."
+        )
+    dataset.meta.tasks = pd.DataFrame(
+        {"task_index": tasks["task_index"].to_numpy()},
+        index=pd.Index([prompt] * len(tasks), name="task"),
+    )
 
 
 def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
@@ -192,6 +212,14 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
+    if cfg.dataset.task_prompt is not None:
+        apply_task_prompt(dataset, cfg.dataset.task_prompt)
+        logging.info(
+            "Training on a single prompt for all %d dataset tasks: %r",
+            dataset.meta.total_tasks,
+            cfg.dataset.task_prompt,
+        )
+
     return dataset
 
 
@@ -276,5 +304,11 @@ def make_train_eval_datasets(
                 ds.meta.stats.setdefault(key, {})
                 for stats_type, stats in IMAGENET_STATS.items():
                     ds.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+
+    # These are fresh datasets, so they carry the on-disk task strings even though
+    # make_dataset() already collapsed them on full_dataset.
+    if cfg.dataset.task_prompt is not None:
+        for ds in (train_dataset, eval_dataset):
+            apply_task_prompt(ds, cfg.dataset.task_prompt)
 
     return train_dataset, eval_dataset
